@@ -125,7 +125,7 @@ class LaneNetDetector:
         ###############################################################################
         
         # Subscribe to camera feed
-        self.sub_image = rospy.Subscriber('oak/rgb/image_raw', Image, self.img_callback, queue_size=1)
+        self.sub_image = rospy.Subscriber('/zed2/zed_node/rgb_raw/image_raw_color', Image, self.img_callback, queue_size=1)
         # note that oak/rgb/image_raw is the topic name for the GEM E4. If you run this on the E2, you will need to change the topic name
         
         # Publishers for visualization and control
