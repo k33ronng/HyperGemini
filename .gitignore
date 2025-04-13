@@ -1,3 +1,5 @@
 gem-workspace-and-starter-code-main/e2/src/weights/*
 gem-workspace-and-starter-code-main/e2/build/
 gem-workspace-and-starter-code-main/e2/devel/
+polaris_gem_e2_simulator/build
+polaris_gem_e2_simulator/devel
