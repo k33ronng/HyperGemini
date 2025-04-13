@@ -9,15 +9,20 @@
 #include <pcl/sample_consensus/model_types.h>
 #include <pcl/segmentation/sac_segmentation.h>
 #include <opencv2/opencv.hpp>
+#include <cv_bridge/cv_bridge.h>
+#include <image_transport/image_transport.h>
 
 class ParkingSpotDetector {
 public:
-    ParkingSpotDetector(ros::NodeHandle& nh) {
+    ParkingSpotDetector(ros::NodeHandle& nh) : it_(nh) {
         sub_ = nh.subscribe("/velodyne_points", 1, &ParkingSpotDetector::pointCloudCallback, this);
+        image_pub_ = it_.advertise("/parking_spot/image", 1);
     }
 
 private:
     ros::Subscriber sub_;
+    image_transport::ImageTransport it_;
+    image_transport::Publisher image_pub_;
 
     void pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg) {
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
@@ -89,7 +94,14 @@ private:
         }
 
         // Debug view (optional): save image to file
-        cv::imwrite("/tmp/bird_eye_view.png", bird_eye);
+        // cv::imwrite("/tmp/bird_eye_view.png", bird_eye);
+
+        std_msgs::Header header;
+        header.stamp = ros::Time::now();
+        header.frame_id = "map";  // Or your preferred fixed frame
+
+        sensor_msgs::ImagePtr image_msg = cv_bridge::CvImage(header, "mono8", bird_eye).toImageMsg();
+        image_pub_.publish(image_msg);
     }
 };
 
