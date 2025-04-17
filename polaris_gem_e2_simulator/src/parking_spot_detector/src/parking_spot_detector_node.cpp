@@ -3,11 +3,10 @@
 #include <gazebo_msgs/ModelStates.h>
 #include <tf/transform_datatypes.h>
 
-std::string vehicle_name = "gem";  // Change if your vehicle has a different model name
 double latest_yaw = 0.0;
 
 void modelStatesCallback(const gazebo_msgs::ModelStates::ConstPtr& msg) {
-    auto it = std::find(msg->name.begin(), msg->name.end(), vehicle_name);
+    auto it = std::find(msg->name.begin(), msg->name.end(), "gem");
     if (it != msg->name.end()) {
         int index = std::distance(msg->name.begin(), it);
         const geometry_msgs::Pose& pose = msg->pose[index];

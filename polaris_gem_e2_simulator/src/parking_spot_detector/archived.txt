@@ -1,0 +1,202 @@
+// parking_spot_detector_node.cpp
+
+#include <ros/ros.h>
+#include <gazebo_msgs/ModelStates.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/Image.h>
+#include <cv_bridge/cv_bridge.h>
+#include <tf/transform_datatypes.h>
+
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/point_types.h>
+#include <pcl/common/transforms.h>
+#include <pcl/common/common.h>
+#include <pcl/search/kdtree.h>
+#include <pcl/segmentation/extract_clusters.h>
+
+#include <opencv2/opencv.hpp>
+
+#include <vector>
+#include <algorithm>
+
+// Simple pixel‐bbox struct
+struct PixelBox {
+  int x1, y1, x2, y2;
+  int cx, cy;
+};
+
+class ParkingSpotDetector {
+public:
+  ParkingSpotDetector(ros::NodeHandle& nh)
+    : map_size_(600),     // 600×600 px
+      scale_(0.05),       // 5cm per pixel
+      vehicle_name_("gem")
+  {
+    // 1) Gazebo model_states → yaw
+    model_states_sub_ = nh.subscribe("/gazebo/model_states", 1,
+                                     &ParkingSpotDetector::modelStatesCB, this);
+    // 2) Velodyne → pointcloud
+    cloud_sub_        = nh.subscribe("/velodyne_points", 1,
+                                     &ParkingSpotDetector::cloudCB, this);
+    // 3) Publish bird’s‐eye + boxes
+    image_pub_        = nh.advertise<sensor_msgs::Image>("parking_spot/bird_eye", 1);
+
+    // clustering params (tweak as needed)
+    cluster_tolerance_ = 0.5;     // meters
+    min_cluster_size_  = 100;
+    max_cluster_size_  = 25000;
+    suv_length_min_    = 3.5;     // m
+    suv_length_max_    = 6.0;
+    suv_width_min_     = 1.5;
+    suv_width_max_     = 3.0;
+  }
+
+private:
+  // ROS
+  ros::Subscriber model_states_sub_, cloud_sub_;
+  ros::Publisher  image_pub_;
+
+  // State
+  double latest_yaw_{0.0};
+  std::string vehicle_name_;
+  std::vector<PixelBox> suv_px_boxes_;
+
+  // Bird’s‐eye params
+  const int    map_size_;
+  const double scale_;
+
+  // Clustering filters
+  double cluster_tolerance_;
+  int    min_cluster_size_, max_cluster_size_;
+  double suv_length_min_, suv_length_max_;
+  double suv_width_min_, suv_width_max_;
+
+  // 1) Get vehicle yaw
+  void modelStatesCB(const gazebo_msgs::ModelStates::ConstPtr& msg) {
+    auto it = std::find(msg->name.begin(), msg->name.end(), vehicle_name_);
+    if (it == msg->name.end()) return;
+    int idx = std::distance(msg->name.begin(), it);
+    latest_yaw_ = tf::getYaw(msg->pose[idx].orientation);
+  }
+
+  // 2) Cloud → BEV image + cluster + detect SUVs + find spot
+  void cloudCB(const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
+    // convert to PCL
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::fromROSMsg(*cloud_msg, *cloud);
+
+    // rotate into vehicle frame
+    Eigen::Affine3f tfm = Eigen::Affine3f::Identity();
+    tfm.rotate(Eigen::AngleAxisf(-latest_yaw_, Eigen::Vector3f::UnitZ()));
+    pcl::PointCloud<pcl::PointXYZ>::Ptr tf_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::transformPointCloud(*cloud, *tf_cloud, tfm);
+
+    // blank BEV
+    cv::Mat bird(map_size_, map_size_, CV_8UC1, cv::Scalar(50));
+
+    // plot points
+    for (auto& p : tf_cloud->points) {
+      int ix = int(p.x/scale_ + map_size_/2);
+      int iy = int(p.y/scale_ + map_size_/2);
+      if (ix>=0 && ix<map_size_ && iy>=0 && iy<map_size_)
+        bird.at<uchar>(map_size_-1-iy, ix) = 200;
+    }
+
+    // cluster extraction
+    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+    tree->setInputCloud(tf_cloud);
+    std::vector<pcl::PointIndices> clusters;
+    pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
+    ec.setClusterTolerance(cluster_tolerance_);
+    ec.setMinClusterSize(min_cluster_size_);
+    ec.setMaxClusterSize(max_cluster_size_);
+    ec.setSearchMethod(tree);
+    ec.setInputCloud(tf_cloud);
+    ec.extract(clusters);
+
+    // clear previous frames
+    suv_px_boxes_.clear();
+
+    // examine clusters
+    for (auto& ci : clusters) {
+      pcl::PointCloud<pcl::PointXYZ>::Ptr cc(new pcl::PointCloud<pcl::PointXYZ>);
+      for (int idx : ci.indices)
+        cc->push_back(tf_cloud->points[idx]);
+
+      pcl::PointXYZ mn, mx;
+      pcl::getMinMax3D(*cc, mn, mx);
+      double length = mx.x - mn.x;
+      double width  = mx.y - mn.y;
+
+      // filter by SUV size
+      if (length < suv_length_min_ || length > suv_length_max_) continue;
+      if (width  < suv_width_min_  || width  > suv_width_max_)  continue;
+
+      // compute pixel bbox
+      int x1 = int(mn.x/scale_ + map_size_/2);
+      int y1 = int(mn.y/scale_ + map_size_/2);
+      int x2 = int(mx.x/scale_ + map_size_/2);
+      int y2 = int(mx.y/scale_ + map_size_/2);
+
+      // clamp
+      x1 = std::max(0, std::min(map_size_-1, x1));
+      x2 = std::max(0, std::min(map_size_-1, x2));
+      y1 = std::max(0, std::min(map_size_-1, y1));
+      y2 = std::max(0, std::min(map_size_-1, y2));
+
+      // center
+      int cx = (x1 + x2)/2;
+      int cy = (y1 + y2)/2;
+
+      // store
+      suv_px_boxes_.push_back({x1, y1, x2, y2, cx, cy});
+
+      // draw SUV box
+      cv::rectangle(bird,
+                    cv::Point(x1, map_size_-1-y2),
+                    cv::Point(x2, map_size_-1-y1),
+                    cv::Scalar(255), 2);
+
+      ROS_INFO("Detected SUV cluster: px x[%d→%d] y[%d→%d]",
+               x1, x2, y1, y2);
+    }
+
+    // if two SUVs, compute the parking spot between them
+    if (suv_px_boxes_.size() >= 2) {
+      // sort by center‐x
+      std::sort(suv_px_boxes_.begin(), suv_px_boxes_.end(),
+                [](auto&a, auto&b){ return a.cx < b.cx; });
+      auto L = suv_px_boxes_[0];
+      auto R = suv_px_boxes_[1];
+
+      int sx1 = L.x2;
+      int sx2 = R.x1;
+      int sy1 = std::max(L.y1, R.y1);
+      int sy2 = std::min(L.y2, R.y2);
+
+      // draw parking-spot box
+      cv::rectangle(bird,
+                    cv::Point(sx1, map_size_-1-sy2),
+                    cv::Point(sx2, map_size_-1-sy1),
+                    cv::Scalar(180), 2);
+
+      ROS_INFO("Parking spot: px x[%d→%d] y[%d→%d]", sx1, sx2, sy1, sy2);
+    }
+
+    // publish BEV image
+    std_msgs::Header hdr;
+    hdr.stamp    = ros::Time::now();
+    hdr.frame_id = "map";
+    sensor_msgs::ImagePtr out =
+      cv_bridge::CvImage(hdr, "mono8", bird).toImageMsg();
+    image_pub_.publish(out);
+  }
+};
+
+int main(int argc, char** argv) {
+  ros::init(argc, argv, "parking_spot_detector");
+  ros::NodeHandle nh;
+  ParkingSpotDetector detector(nh);
+  ros::spin();
+  return 0;
+}
