@@ -1,4 +1,19 @@
 #include <ros/ros.h>
+
+#include <gazebo_msgs/ModelStates.h>
+#include <tf/transform_datatypes.h>
+
+std::string vehicle_name = "gem";  // Change if your vehicle has a different model name
+double latest_yaw = 0.0;
+
+void modelStatesCallback(const gazebo_msgs::ModelStates::ConstPtr& msg) {
+    auto it = std::find(msg->name.begin(), msg->name.end(), vehicle_name);
+    if (it != msg->name.end()) {
+        int index = std::distance(msg->name.begin(), it);
+        const geometry_msgs::Pose& pose = msg->pose[index];
+        latest_yaw = tf::getYaw(pose.orientation);
+    }
+}
 #include <sensor_msgs/PointCloud2.h>
 #include <pcl_ros/point_cloud.h>
 #include <pcl/point_types.h>
@@ -66,11 +81,33 @@ private:
             }
         }
 
-        for (uint x = map_size / 2 - 2; x <= map_size / 2 + 2; x++) {
-            for (uint y = map_size / 2 - 2; y <= map_size / 2 + 2; y++) {
-                bird_eye.at<uchar>(x, y) = 255;
-            }
+        // Draw real-sized vehicle bounding box in 2D image (2.5m x 1.2m)
+        int car_center_x = map_size / 2;
+        int car_center_y = map_size / 2;
+        int car_length_px = static_cast<int>(2.5 / resolution);  // 25 pixels
+        int car_width_px = static_cast<int>(1.2 / resolution);   // 12 pixels
+
+        cv::RotatedRect car_box(
+            cv::Point2f(car_center_x, map_size - car_center_y - 1),
+            cv::Size2f(car_length_px, car_width_px),
+            0.0f  // No rotation for now
+        );
+        cv::Point2f box_points[4];
+        car_box.points(box_points);
+        // Draw bounding box
+        for (int i = 0; i < 4; ++i) {
+            cv::line(bird_eye, box_points[i], box_points[(i + 1) % 4], cv::Scalar(255), 2);
         }
+
+        // Draw orientation arrow using GNSS yaw
+        cv::Point2f arrow_start(car_center_x, map_size - car_center_y - 1);
+        float arrow_length = static_cast<float>(car_length_px) / 2.0f;
+        cv::Point2f arrow_end = arrow_start + cv::Point2f(
+            arrow_length * cos(latest_yaw),
+            -arrow_length * sin(latest_yaw)
+        );
+        cv::arrowedLine(bird_eye, arrow_start, arrow_end, cv::Scalar(255), 2);
+
         
 
         // Morphology + Contour Detection
