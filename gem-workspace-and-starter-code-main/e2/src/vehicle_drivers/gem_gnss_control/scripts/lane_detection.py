@@ -25,7 +25,7 @@ import numpy as np
 from numpy import linalg as la
 import scipy.signal as signal
 from cv_bridge import CvBridge, CvBridgeError
-
+from collections import deque
 from filters import OnlineFilter
 
 
@@ -125,7 +125,7 @@ class LaneNetDetector:
         ###############################################################################
         
         # Subscribe to camera feed
-        self.sub_image = rospy.Subscriber('/zed2/zed_node/rgb_raw/image_raw_color', Image, self.img_callback, queue_size=1)
+        self.sub_image = rospy.Subscriber('/zed2/zed_node/left/image_rect_color', Image, self.img_callback, queue_size=1)
         # note that oak/rgb/image_raw is the topic name for the GEM E4. If you run this on the E2, you will need to change the topic name
         
         # Publishers for visualization and control
@@ -352,16 +352,17 @@ class LaneNetDetector:
     def generate_waypoints(self, lane_mask):
         """
         Generate navigation waypoints from lane mask.
-        
-        This function:
-        1. Scans the lane mask from bottom to top
-        2. Identifies the left lane boundary
-        3. Estimates center of lane using offset from boundary
-        4. Creates waypoints for vehicle to follow
-        
+
+        This improved version:
+        1. Scans lane mask from bottom to top
+        2. Identifies left and right lane boundaries (if available)
+        3. Synthesizes missing edges using adaptive lane width
+        4. Calculates lane center dynamically
+        5. Creates waypoints and end goal for navigation
+
         Args:
             lane_mask: Binary mask of detected lane markings
-            
+
         Returns:
             path: ROS Path message with waypoints
             left_boundary: List of points representing left lane boundary
@@ -369,69 +370,114 @@ class LaneNetDetector:
         # Create ROS Path message
         path = Path()
         path.header.frame_id = "map"
-        
+
         # Get dimensions of lane mask
         height, width = lane_mask.shape
-        
+
         # Sampling parameters
-        sampling_step = 10  # Sample every 10 pixels vertically
+        sampling_step = 20  # Sample every 10 pixels vertically
         left_boundary = []  # Store left boundary points
-        offset_pixels = 200  # Estimated distance from left boundary to lane center
-        
+        right_boundary = [] # Store right boundary points
+
+        # Initialize lane width tracking if not already present
+        if not hasattr(self, 'lane_width_history'):
+            self.lane_width_history = deque(maxlen=15)
+        if not hasattr(self, 'estimated_lane_width_pixels'):
+            self.estimated_lane_width_pixels = 200  # initial estimate
+
         ###############################################################################
         # Scan Lane Mask and Extract Boundaries
         ###############################################################################
-        
+
         # Scan from bottom to top of image
         for y in range(height - 1, 0, -sampling_step):
-            # Find all x coordinates where lane marking exists at this y
             x_indices = np.where(lane_mask[y, :] > 0)[0]
-            
-            if len(x_indices) > 0:
-                # Use leftmost point as left boundary
+
+            if len(x_indices) > 1:
+                # Both edges visible
                 x_left = x_indices[0]
-                # Store with slight offset for better tracking
-                left_boundary.append((x_left - 40, y))
+                x_right = x_indices[-1]
+                left_boundary.append((x_left, y))
+                right_boundary.append((x_right, y))
+            elif len(x_indices) == 1:
+                # Only one edge visible → infer which side
+                x = x_indices[0]
+                if x < width // 2:
+                    left_boundary.append((x, y))
+                    right_boundary.append(None)
+                else:
+                    left_boundary.append(None)
+                    right_boundary.append((x, y))
             else:
-                # No lane marking found at this y
+                # No lane detected at this row
                 left_boundary.append(None)
-                
-        # Filter boundaries to get continuous line segments
+                right_boundary.append(None)
+
+        # Filter to remove discontinuities
         left_boundary = self.filter_continuous_boundary(left_boundary)
-        
+        right_boundary = self.filter_continuous_boundary(right_boundary)
+
         ###############################################################################
-        # Generate Waypoints from Boundaries
+        # Generate Waypoints from Lane Boundaries
         ###############################################################################
-        
-        # Create waypoints from left boundary with offset
-        for lb in left_boundary:
-            if lb:  # If boundary point exists
-                # Calculate lane center by adding offset to left boundary
-                x_center = lb[0] + offset_pixels
+        is_single_line = True
+        for lb, rb in zip(left_boundary, right_boundary):
+            if lb is not None and rb is not None:
+                # Use both boundaries
+                lane_width = rb[0] - lb[0]
+                self.lane_width_history.append(lane_width)
+                # Calculate center of lane
+                x_center = (lb[0] + rb[0]) // 2
                 y = lb[1]
-                
-                # Create ROS PoseStamped message for waypoint
-                point = PoseStamped()
-                point.pose.position.x = x_center
-                point.pose.position.y = y
-                path.poses.append(point)
-                
+                is_single_line = False
+            elif lb is not None:
+                # No right boundary → assume lane center is offset from left
+                lane_width = np.median(self.lane_width_history) if self.lane_width_history else self.estimated_lane_width_pixels
+                x_center = lb[0] + int(0.5 * lane_width)  # center offset from left
+                y = lb[1]
+                is_single_line = False
+            elif rb is not None:
+                # No left boundary → assume lane center is offset from right
+                lane_width = np.median(self.lane_width_history) if self.lane_width_history else self.estimated_lane_width_pixels
+                x_center = rb[0] - int(0.5 * lane_width)  # center offset from right
+                y = rb[1]
+                is_single_line = False
+            else:
+                # Both missing → skip row
+                continue
+
+            # Update estimated lane width adaptively
+            self.estimated_lane_width_pixels = max(
+                0.35 * width,
+                0.7 * self.estimated_lane_width_pixels + 0.3 * lane_width
+            )
+
+            # Create ROS PoseStamped message for waypoint
+            point = PoseStamped()
+            point.pose.position.x = x_center
+            point.pose.position.y = y
+            path.poses.append(point)
+
         # Use only the first 7 waypoints (closest to vehicle)
-        path.poses = path.poses[:7]
-        
+        path.poses = path.poses[:10]
+        if is_single_line is False:
+            print("Single line detected, adjusting waypoints")
+            for i in range(len(path.poses)):
+                path.poses[i].pose.position.x = path.poses[i].pose.position.x + 0.3 * self.estimated_lane_width_pixels
+
         ###############################################################################
         # Calculate End Goal (Target Point)
         ###############################################################################
-        
+
         if len(path.poses) > 0:
             # Extract x and y coordinates from all waypoints
             xs = [p.pose.position.x for p in path.poses]
             ys = [p.pose.position.y for p in path.poses]
-            
+
             # Use median for stability
             median_x = np.median(xs)
             median_y = np.median(ys)
-            
+
             # Create end goal pose
             self.endgoal = PoseStamped()
             self.endgoal.header = path.header
@@ -440,7 +486,7 @@ class LaneNetDetector:
         else:
             # No waypoints found
             self.endgoal = None
-            
+
         return path, left_boundary
 
     def filter_continuous_boundary(self, boundary):

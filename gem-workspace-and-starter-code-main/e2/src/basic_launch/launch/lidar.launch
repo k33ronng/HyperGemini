@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Top LiDAR -->
+  <include file="$(find ouster_ros)/launch/driver.launch" />
+</launch>
+
+
+
+
+
+
+

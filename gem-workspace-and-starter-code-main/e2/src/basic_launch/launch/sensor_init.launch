@@ -21,7 +21,7 @@
   <include file="$(find septentrio_gnss_driver)/launch/rover.launch" />
   
   <!-- Top LiDAR -->
-  <include file="$(find ouster_ros)/launch/driver.launch" />
+  <!-- <include file="$(find ouster_ros)/launch/driver.launch" /> -->
   
   <!-- Front Camera -->
   <include file="$(find zed_wrapper)/launch/zed2.launch" />

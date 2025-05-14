@@ -1,0 +1,50 @@
+<launch>
+  <!-- ===================== Sensor Setup ===================== -->
+  <arg name="use_sim_time" default="false" />
+  <param name="use_sim_time" value="$(arg use_sim_time)" />
+
+  <!-- Static TF: base_link -> os_sensor -->
+  <node pkg="tf2_ros" type="static_transform_publisher" name="base_link_to_lidar1" args="-0.12 0 1.6 0 0 0 base_link os_sensor" />
+
+
+  <!-- Robot Description -->
+  <param name="robot_description" command="$(find xacro)/xacro '$(find gem_description)/urdf/gem.urdf.xacro'" />
+
+  <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" output="screen"/>
+  <node name="joint_state_publisher" pkg="joint_state_publisher" type="joint_state_publisher" />
+
+  <include file="$(find platform_launch)/launch/white_e2/platform.launch">
+    <arg name="use_camera" value="true" />
+  </include>
+
+  <include file="$(find septentrio_gnss_driver)/launch/rover.launch" />
+
+  <!-- <include file="$(find ouster_ros)/launch/driver.launch" /> -->
+
+  <include file="$(find zed_wrapper)/launch/zed2.launch" />
+
+  <include file="$(find arena_camera)/launch/arena_camera_node_multi_device.launch" />
+
+  <!-- ===================== Fast-LIO Mapping ===================== -->
+  <rosparam command="load" file="$(find fast_lio)/config/ouster64.yaml" />
+  
+  <param name="feature_extract_enable" type="bool" value="0"/>
+  <param name="point_filter_num" type="int" value="4"/>
+  <param name="max_iteration" type="int" value="3" />
+  <param name="filter_size_surf" type="double" value="0.5" />
+  <param name="filter_size_map" type="double" value="0.5" />
+  <param name="cube_side_length" type="double" value="1000" />
+  <param name="runtime_pos_log_enable" type="bool" value="0" />
+
+  <!-- Launch Fast-LIO -->
+  <node pkg="fast_lio" type="fastlio_mapping" name="laserMapping" output="screen" />
+
+  <!-- Critical: Add camera_init -> os_sensor TF -->
+  <node pkg="tf2_ros" type="static_transform_publisher" name="camera_init_to_os_sensor" args="-0.12 0 1.6 0 0 0 base_link camera_init" />
+
+  <!-- RViz (optional) -->
+  <arg name="rviz" default="true"/>
+  <group if="$(arg rviz)">
+    <node pkg="rviz" type="rviz" name="rviz" args="-d $(find platform_launch)/rviz/white_e2_text.rviz" />
+  </group>
+</launch>

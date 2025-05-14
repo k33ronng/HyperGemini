@@ -42,7 +42,7 @@ class LaneFollowController:
         """
         # Initialize ROS node
         rospy.init_node('lane_follow_controller', anonymous=True)
-        self.rate = rospy.Rate(10)  # 10 Hz control loop
+        self.rate = rospy.Rate(100)  # 10 Hz control loop
 
         ###############################################################################
         # Controller Parameters
@@ -50,13 +50,13 @@ class LaneFollowController:
         
         # Vehicle control parameters
         self.desired_speed = 1       # Target speed in m/s
-        self.max_accel = 2.5         # Maximum acceleration command (0-1 scale)
+        self.max_accel = 1.5         # Maximum acceleration command (0-1 scale)
         self.image_width = 1280      # Camera image width in pixels
         self.image_center_x = self.image_width / 2.0  # Image center x-coordinate
         
         # Initialize PID controllers
-        self.pid_speed = PID(kp=0.5, ki=0.0, kd=0.1, wg=20)  # Speed controller with windup guard
-        self.pid_steer = PID(kp=0.01, ki=0.0, kd=0.005)      # Steering controller
+        self.pid_speed = PID(kp=0.09, ki=0.05, kd=0.02, wg=20)  # Speed controller with windup guard
+        self.pid_steer = PID(kp=0.027, ki=0.0, kd=0.005)      # Steering controller
 
         ###############################################################################
         # Vehicle State Variables
@@ -286,8 +286,8 @@ class LaneFollowController:
                     # Apply limits to acceleration command
                     if speed_output_accel > self.max_accel:
                         speed_output_accel = self.max_accel  # Cap maximum acceleration
-                    if speed_output_accel < 0.2:
-                        speed_output_accel = 0.2  # Minimum acceleration to prevent stalling
+                    # if speed_output_accel < 0.2:
+                    #     speed_output_accel = 0.2  # Minimum acceleration to prevent stalling
                 else:
                     # Maintain current speed
                     speed_output_accel = 0.0
@@ -311,17 +311,29 @@ class LaneFollowController:
                 self.steer_cmd.angular_position = math.radians(steering_angle)
                 
                 # Log status information
-                if self.gem_enable:
-                    rospy.loginfo(f"Lateral error: {lateral_error_pixels} px, Steering angle: {steering_angle} deg, Speed: {self.speed} m/s")
+                # if self.gem_enable:
+                    # rospy.loginfo(f"Lateral error: {lateral_error_pixels} px, Steering angle: {steering_angle} deg, Speed: {self.speed} m/s")
                 
                 ###############################################################################
                 # Publish Control Commands
                 ###############################################################################
                 
                 # Send updated commands to vehicle
-                self.accel_pub.publish(self.accel_cmd)
-                self.steer_pub.publish(self.steer_cmd)
-                self.turn_pub.publish(self.turn_cmd)
+                if self.speed > 1.4:
+                    print('BRAKING')
+                    self.brake_cmd.f64_cmd = 0.6
+                    self.accel_cmd.f64_cmd = 0
+                    self.accel_pub.publish(self.accel_cmd)
+                    self.brake_pub.publish(self.brake_cmd)
+                    self.steer_pub.publish(self.steer_cmd)
+                    self.turn_pub.publish(self.turn_cmd)
+                    self.brake_cmd.f64_cmd = 0
+                else:
+                    self.brake_cmd.f64_cmd = 0.0
+                    self.brake_pub.publish(self.brake_cmd)
+                    self.accel_pub.publish(self.accel_cmd)
+                    self.steer_pub.publish(self.steer_cmd)
+                    self.turn_pub.publish(self.turn_cmd)
             
             # Wait for next control cycle
             self.rate.sleep()
